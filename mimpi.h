@@ -125,10 +125,10 @@ MIMPI_Retcode MIMPI_Barrier();
 /// available among all processes at address @ref data.
 /// Additionally, is a synchronisation point similarly to @ref MIMPI_Barrier.
 ///
-/// @param data - for @ref root, data to be broadcast; for other processes,
+/// @param data - for @ref root, data to be broadcast_tree; for other processes,
 ///               place where data are to be put.
-/// @param count - number of bytes of data to be broadcast.
-/// @param root - rank of the process whose data are to be broadcast.
+/// @param count - number of bytes of data to be broadcast_tree.
+/// @param root - rank of the process whose data are to be broadcast_tree.
 ///
 /// @return MIMPI return code:
 ///         - `MIMPI_SUCCESS` if operation ended successfully.

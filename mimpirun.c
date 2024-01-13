@@ -8,8 +8,6 @@
 // set enviroment variable to indicate which is first fd that we used tor channels
 // return first channel number
 
-int sync_channel[2];
-
 int create_channels(int n) {
 
     int fd[2];
@@ -40,14 +38,10 @@ int create_channels(int n) {
         //TODO assert ze sa w dobrej kolejnosci
     }
 
-    // stworzyc n chaneli na broadcast
+    // stworzyc n chaneli na broadcast_tree
     for (int i = 0; i < n; ++i) {
         channel(fd);
     }
-
-    // stworzy sync pipe
-    channel(sync_channel);
-
 
     return minimal;
 }
@@ -69,12 +63,6 @@ int main(int argc, char *argv[]) {
     channels_init();
 
     int minimal_fd = create_channels(n);
-
-    char idx = 1;
-    for (int i = 0; i < n; ++i) {
-        chsend(sync_channel[1], &idx, 1);
-        idx++;
-    }
 
     for (int i = 0; i < n; i++) {
         rank++;
@@ -99,12 +87,6 @@ int main(int argc, char *argv[]) {
     int broadcast_fd = minimal_fd + channel_n;
 
     for (int i = broadcast_fd; i < broadcast_fd + n * 2; ++i) {
-        ASSERT_SYS_OK(close(i));
-    }
-
-    int sync_fd = broadcast_fd + n * 2;
-
-    for (int i = sync_fd; i < sync_fd + 2; ++i) {
         ASSERT_SYS_OK(close(i));
     }
 

@@ -11,9 +11,47 @@ static int world_rank = -1;
 
 int channels[16][16][2]; // not used fields are marked with -1
 
-int broadcast[16][2];
+// IN BROADCAST WE USE FROM 1 INDEXING
+int broadcast_tree[17][2];
 
-int sync_channel[2] = {0, 0};
+
+
+
+int* get_curr(int id) {
+    return broadcast_tree[id];
+}
+
+int* get_father(int id) {
+    return broadcast_tree[id/2];
+}
+
+int* get_left_child(int id) {
+    if (id * 2 > world_size) return NULL;
+
+    return broadcast_tree[id * 2];
+}
+
+int* get_right_child(int id) {
+    if (id * 2 + 1> world_size) return NULL;
+
+    return broadcast_tree[id * 2 + 1];
+}
+
+void close_read(const int* id) {
+    if (id == NULL) return;
+
+//    if (world_rank == 0) printf("closing read: %d RANK %d\n", id[0], world_rank + 1);
+
+    if (id[0] != -1) ASSERT_SYS_OK(close(id[0]));
+}
+
+void close_write(const int* id) {
+    if (id == NULL) return;
+
+//    if (world_rank == 0) printf("closing write : %d RANK %d\n", id[1], world_rank + 1);
+
+    if (id[1] != -1) ASSERT_SYS_OK(close(id[1]));
+}
 
 // function assume that from and to are correct
 // it return -1 if channel is closed
@@ -94,21 +132,16 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         ASSERT_SYS_OK(close(tmp_fd++));
     }
 
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i <= 16; ++i) {
         for (int j = 0; j < 2; ++j) {
-            broadcast[i][j] = -1;
+            broadcast_tree[i][j] = -1;
         }
     }
 
-    for (int i = 0; i < n; ++i) {
-        broadcast[i][0] = tmp_fd++;
-        broadcast[i][1] = tmp_fd++;
+    for (int i = 1; i <= n; ++i) {
+        broadcast_tree[i][0] = tmp_fd++;
+        broadcast_tree[i][1] = tmp_fd++;
     }
-
-    //if (n == 1) tmp_fd += 2;
-
-    sync_channel[0] = tmp_fd++;
-    sync_channel[1] = tmp_fd++;
 
     // closing not used channels
 
@@ -137,54 +170,62 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         }
     }
 
-    // closing broadcast channels
-    for (int i = 0; i < n; ++i) {
-        if (i == world_rank) {
-            ASSERT_SYS_OK(close(broadcast[i][1]));
+////     closing broadcast_tree channels
+//    for (int i = 0; i < n; ++i) {
+//        if (i == world_rank) {
+//            ASSERT_SYS_OK(close(broadcast_tree[i][1]));
+//        } else {
+//            ASSERT_SYS_OK(close(broadcast_tree[i][0]));
+//        }
+//    }
+
+    int id = world_rank + 1;
+    int* us = get_curr(id);
+    int* father = get_father(id);
+    int* l_child = get_left_child(id);
+    int* r_child = get_right_child(id);
+
+    for (int i = 1; i <= n; ++i) {
+        int* curr= get_curr(i);
+
+        if (curr == us) {
+            close_write(us);
+        } else if (curr == father) {
+            close_read(father);
+        } else if (curr == l_child) {
+            close_read(l_child);
+        } else if (curr == r_child) {
+            close_read(r_child);
         } else {
-            ASSERT_SYS_OK(close(broadcast[i][0]));
+            ASSERT_SYS_OK(close(curr[0]));
+            ASSERT_SYS_OK(close(curr[1]));
         }
     }
 
-    if (debug) {
-        if (world_rank == 0 ) {
-            for (int i = 0; i < n; ++i) {
-                for (int j = 0; j < n; ++j) {
-                    printf(" (%d, %d) ", channels[i][j][0], channels[i][j][1]);
-                }
-                printf("\n");
-            }
-        }
-    }
+//    if (debug) {
+//        if (world_rank == 0 ) {
+//            for (int i = 0; i < n; ++i) {
+//                for (int j = 0; j < n; ++j) {
+//                    printf(" (%d, %d) ", channels[i][j][0], channels[i][j][1]);
+//                }
+//                printf("\n");
+//            }
+//        }
+//    }
 
-    if (debug)
-        if (world_rank == 0) {
-            for (int i = 0; i < n; ++i) {
-                printf(" (%d, %d) ", broadcast[i][0], broadcast[i][1]);
-            }
-            printf("\n");
-        }
+//    if (debug) {
+//        if (world_rank == 0) {
+//            for (int i = 1; i <= n; ++i) {
+//                printf(" (%d, %d) ", broadcast_tree[i][0], broadcast_tree[i][1]);
+//            }
+//            printf("\n");
+//        }
+//    }
+
 }
 
 void MIMPI_Finalize() {
     // pozamykac wszystkie channele ktorych bysme potrzebowali
-
-//    for (int i = 0; i < world_size; ++i) {
-//        if (channels[world_rank][i][0] != -1 && channels[i][world_rank][0] != -1) {
-//            printf("closing: %d\n", channels[world_rank][i][0]);
-//            printf("closing: %d\n", channels[world_rank][i][1]);
-//            printf("closing: %d\n", channels[i][world_rank][0]);
-//            printf("closing: %d\n", channels[i][world_rank][1]);
-//
-//            ASSERT_SYS_OK(close(channels[world_rank][i][0]));
-//            ASSERT_SYS_OK(close(channels[world_rank][i][1]));
-//            ASSERT_SYS_OK(close(channels[i][world_rank][0]));
-//            ASSERT_SYS_OK(close(channels[i][world_rank][1]));
-//
-//        }
-//    }
-
-//    print_open_descriptors();
 
     for (int i = 0; i < world_size; ++i) {
         for (int j = 0; j < world_size; ++j) {
@@ -206,24 +247,25 @@ void MIMPI_Finalize() {
         }
     }
 
-    // closing broadcast channels
-    for (int i = 0; i < world_size; ++i) {
-        if (i == world_rank) {
-            ASSERT_SYS_OK(close(broadcast[i][0]));
-//            printf("closing fd: %d\n", broadcast[i][0]);
-        } else {
-            ASSERT_SYS_OK(close(broadcast[i][1]));
-//            printf("closing fd: %d\n", broadcast[i][1]);
+    int id = world_rank + 1;
+    int* us = get_curr(id);
+    int* father = get_father(id);
+    int* l_child = get_left_child(id);
+    int* r_child = get_right_child(id);
 
+    for (int i = 1; i <= world_size; ++i) {
+        int* curr= get_curr(i);
+
+        if (curr == us) {
+            close_read(us);
+        } else if (curr == father) {
+            close_write(father);
+        } else if (curr == l_child) {
+            close_write(l_child);
+        } else if (curr == r_child) {
+            close_write(r_child);
         }
     }
-//
-    ASSERT_SYS_OK(close(sync_channel[0]));
-    ASSERT_SYS_OK(close(sync_channel[1]));
-//
-//    printf("closing fd: %d\n", sync_channel[0]);
-//    printf("closing fd: %d\n", sync_channel[1]);
-
 
     if (debug) print_open_descriptors();
 
@@ -318,7 +360,7 @@ MIMPI_Retcode MIMPI_Recv(
 //
 //    for (int i = 0; i < world_size; ++i) {
 //        if (i != world_rank) {
-//            chsend(broadcast[i][1], &dummy, 1);
+//            chsend(broadcast_tree[i][1], &dummy, 1);
 ////            printf("rank %d: sended to %d\n", world_rank, i);
 //        }
 //    }
@@ -326,7 +368,7 @@ MIMPI_Retcode MIMPI_Recv(
 //    int readed = 0;
 //
 //    while (readed < world_size - 1) {
-//        int res = chrecv(broadcast[world_rank][0], &dummy, 1);
+//        int res = chrecv(broadcast_tree[world_rank][0], &dummy, 1);
 //        printf("recieved: %d\n", res);
 //
 //        readed += res;
@@ -334,7 +376,7 @@ MIMPI_Retcode MIMPI_Recv(
 //
 //    for (int i = 0; i < world_size; ++i) {
 //        if (i != world_rank) {
-//            chsend(broadcast[i][1], &dummy, 1);
+//            chsend(broadcast_tree[i][1], &dummy, 1);
 ////            printf("rank %d: sended final to %d\n", world_rank, i);
 //        }
 //    }
@@ -351,8 +393,8 @@ MIMPI_Retcode MIMPI_Recv(
 //    if (world_size == 1) return MIMPI_SUCCESS;
 //
 //    int start_pipe[2];
-//    start_pipe[0] = broadcast[0][0];
-//    start_pipe[1] = broadcast[0][1];
+//    start_pipe[0] = broadcast_tree[0][0];
+//    start_pipe[1] = broadcast_tree[0][1];
 //
 //    char idx;
 //    chrecv(sync_channel[0], &idx, 1);
@@ -378,47 +420,131 @@ MIMPI_Retcode MIMPI_Recv(
 //    }
 //}
 
+//MIMPI_Retcode MIMPI_Barrier() {
+//    // 1. wyslac swoje kuminakaty
+//    // 2. zaczekac az zbierze sie n komunikatow
+//    // special case jak jestesmy sami i ktorys sie wczesniej zakonczyl
+//
+//    if (world_size == 1) return MIMPI_SUCCESS;
+//
+////    int start_pipe[2];
+//
+//    char idx;
+//    chrecv(sync_channel[0], &idx, 1);
+//
+//    char dummy = (char)world_rank;
+//
+//    if (idx > 1) {
+////        print_open_descriptors();
+////        printf("ds: %d\n", broadcast_tree[(int)idx][0]);
+//        ASSERT_SYS_OK(chrecv(broadcast_tree[(int)idx][0], &dummy, 1));
+//
+////        printf("rec: %d\n", rec);
+//
+//        if (idx * 2 < world_size)
+//            chsend(broadcast_tree[idx * 2 - 1][1], &dummy, 1);
+//        else {
+//            chsend(dummy_channel[1], &dummy, 1);
+//        }
+//
+//        if (idx * 2 + 1 < world_size)
+//            chsend(broadcast_tree[idx * 2][1], &dummy, 1);
+//        else {
+//            chsend(dummy_channel[1], &dummy, 1);
+//        }
+//
+//        return MIMPI_SUCCESS;
+//    } else {
+//        // we are last
+//
+//        char idxs[world_size];
+//        for (int i = world_size; i >= 1; --i) {
+//            idxs[world_size - i] = i;
+//        }
+////        for (int i = 0; i < world_size; ++i) {
+////            printf("%d", idxs[i]);
+////        }
+////        printf("\n");
+//
+//        chsend(sync_channel[1], idxs, world_size);
+//
+//
+//
+//        if (idx * 2 < world_size) {
+////            printf("1\n");
+//            chsend(broadcast_tree[idx * 2 - 1][1], &dummy, 1);
+//        }
+//
+//        if (idx * 2 + 1 < world_size) {
+////            printf("2\n");
+//
+//            chsend(broadcast_tree[idx * 2][1], &dummy, 1);
+//        }
+//
+//        return MIMPI_SUCCESS;
+//    }
+//}
+
 MIMPI_Retcode MIMPI_Barrier() {
-    // 1. wyslac swoje kuminakaty
-    // 2. zaczekac az zbierze sie n komunikatow
-    // special case jak jestesmy sami i ktorys sie wczesniej zakonczyl
+    // jesli mamy dzieci czekamy na nie
+    // kiedy dzieci skoncza wysylamy sygnal do ojca i czekamy na ojca
 
     if (world_size == 1) return MIMPI_SUCCESS;
 
-//    int start_pipe[2];
+    int id = world_rank + 1;
+    int* us = get_curr(id);
+    char dummy = 0;
 
-    char idx;
-    chrecv(sync_channel[0], &idx, 1);
-
-    char dummy = (char)world_rank;
-
-    if (idx < world_size) {
-        chrecv(broadcast[(int)idx][0], &dummy, 1);
-
-        if (idx * 2 < world_size)
-            chsend(broadcast[idx * 2 - 1][1], &dummy, 1);
-
-        if (idx * 2 + 1 < world_size)
-            chsend(broadcast[idx * 2][1], &dummy, 1);
-
-        return MIMPI_SUCCESS;
-    } else {
-        // we are last
-
-        char idxs[world_size];
-        for (int i = 0; i < world_size; ++i) {
-            idxs[i] = i + 1;
-        }
-        chsend(sync_channel[1], idxs, world_size);
-
-        if (idx * 2 < world_size)
-            chsend(broadcast[idx * 2 - 1][1], &dummy, 1);
-
-        if (idx * 2 + 1 < world_size)
-            chsend(broadcast[idx * 2][1], &dummy, 1);
-
-        return MIMPI_SUCCESS;
+    if (id * 2 <= world_size) {
+//        print_open_descriptors();
+//        for (int i = 1; i < world_size + 1; ++i) {
+//            printf(" (%d, %d) ", broadcast_tree[i][0], broadcast_tree[i][1]);
+//        }
+//        printf("\n");
+//        if (id == 1) print_open_descriptors();
+//        printf("R: %d, czeka na LD na ds: %d\n", id, us[0]);
+        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
     }
+
+    if (id * 2 + 1 <= world_size) {
+//        printf("R: %d, czeka na PD na ds: %d\n", id, us[0]);
+        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
+    }
+
+    int* father = get_father(id);
+    // send that we are ready
+//    printf("R: %d wysyla do ojca na ds %d\n", id, father[1]);
+    chsend(father[1], &dummy, 1);
+
+    // czekamy az nas obudzi
+    if (id != 1) {
+//        printf("R: %d czeka na obudzenie na ds %d\n", id, us[0]);
+        chrecv(us[0], &dummy, 1);
+    }
+
+    // budzimy dzieci
+    if (id * 2 <= world_size) {
+        int* l_child = get_left_child(id);
+
+        if (l_child != NULL) {
+//            printf("R: %d budzi L ds: %d\n", id, l_child[1]);
+            ASSERT_SYS_OK(chsend(l_child[1], &dummy, 1));
+        }
+
+    }
+
+    if (id * 2 + 1 <= world_size) {
+        int* r_child = get_right_child(id);
+
+        if (r_child != NULL) {
+//            printf("R: %d budzi R ds: %d\n", id, r_child[1]);
+            ASSERT_SYS_OK(chsend(r_child[1], &dummy, 1));
+        }
+
+    }
+
+    return MIMPI_SUCCESS;
+
 }
 
 MIMPI_Retcode MIMPI_Bcast(
