@@ -8,8 +8,9 @@
 // set enviroment variable to indicate which is first fd that we used tor channels
 // return first channel number
 
+int sync_channel[2];
+
 int create_channels(int n) {
-    channels_init();
 
     int fd[2];
 
@@ -28,7 +29,7 @@ int create_channels(int n) {
 
     // stworzyc channele ile ich ma byc?
     // n * (n-1) / 2 * 2 = n * (n - 1)
-
+    // TODO pomyslec co sie dzieje jak n=1
 
     int channel_n = n * (n - 1) - 1; // 1 zostal channel juz stworzony
 
@@ -39,7 +40,14 @@ int create_channels(int n) {
         //TODO assert ze sa w dobrej kolejnosci
     }
 
-    channels_finalize();
+    // stworzyc n chaneli na broadcast
+    for (int i = 0; i < n; ++i) {
+        channel(fd);
+    }
+
+    // stworzy sync pipe
+    channel(sync_channel);
+
 
     return minimal;
 }
@@ -58,7 +66,15 @@ int main(int argc, char *argv[]) {
 
     setenv("MIMPI_NUM_PROCESSES", argv[1], 1);
 
+    channels_init();
+
     int minimal_fd = create_channels(n);
+
+    char idx = 1;
+    for (int i = 0; i < n; ++i) {
+        chsend(sync_channel[1], &idx, 1);
+        idx++;
+    }
 
     for (int i = 0; i < n; i++) {
         rank++;
@@ -74,16 +90,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    for (int i = minimal_fd; i < minimal_fd + n * (n - 1); ++i) {
+    int channel_n = n > 1 ? n * (n - 1) * 2 : 2;
+
+    for (int i = minimal_fd; i < minimal_fd + channel_n; ++i) {
         ASSERT_SYS_OK(close(i));
     }
 
-//    print_open_descriptors();
+    int broadcast_fd = minimal_fd + channel_n;
+
+    for (int i = broadcast_fd; i < broadcast_fd + n * 2; ++i) {
+        ASSERT_SYS_OK(close(i));
+    }
+
+    int sync_fd = broadcast_fd + n * 2;
+
+    for (int i = sync_fd; i < sync_fd + 2; ++i) {
+        ASSERT_SYS_OK(close(i));
+    }
+
+    if (debug) print_open_descriptors();
 
     for (int i = 0; i < n; i++) {
         int status;
         ASSERT_SYS_OK(wait(&status));
     }
 
+    channels_finalize();
     exit(EXIT_SUCCESS);
 }
