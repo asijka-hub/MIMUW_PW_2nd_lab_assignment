@@ -367,28 +367,48 @@ MIMPI_Retcode MIMPI_Barrier() {
     int id = world_rank;
     int* us = get_curr(id);
     char dummy = 0;
+    int rec = 0;
 
     if (id * 2 + 1 < world_size) {
-//        printf("R: %d, czeka na LD na ds: %d\n", id, us[0]);
-        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
+        printf("R: %d, czeka na LD na ds: %d\n", id, us[0]);
+//        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
+        rec = chrecv(us[0], &dummy, 1);
+
+        if (rec == 0) {
+            printf("R: %d konczy\n", id);
+
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
     }
 
     if (id * 2 + 2 < world_size) {
-//        printf("R: %d, czeka na PD na ds: %d\n", id, us[0]);
-        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
+        printf("R: %d, czeka na PD na ds: %d\n", id, us[0]);
+        rec = chrecv(us[0], &dummy, 1);
+
+        if (rec == 0) {
+            printf("R: %d konczy\n", id);
+
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
     }
 
     int* father = get_father(id);
     // send that we are ready
     if (id != 0) {
-//        printf("R: %d wysyla do ojca na ds %d\n", id, father[1]);
+        printf("R: %d wysyla do ojca na ds %d\n", id, father[1]);
         chsend(father[1], &dummy, 1);
     }
 
-    // czekamy az nas obudzi
+    // czekamy az obudzi nas ojciec
     if (id != 0) {
-//        printf("R: %d czeka na obudzenie na ds %d\n", id, us[0]);
-        chrecv(us[0], &dummy, 1);
+        printf("R: %d czeka na obudzenie na ds %d\n", id, us[0]);
+        rec = chrecv(us[0], &dummy, 1);
+
+        if (rec == 0) {
+            printf("R: %d konczy\n", id);
+
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
     }
 
     // budzimy dzieci
@@ -396,7 +416,7 @@ MIMPI_Retcode MIMPI_Barrier() {
         int* l_child = get_left_child(id);
 
         if (l_child != NULL) {
-//            printf("R: %d budzi L ds: %d\n", id, l_child[1]);
+            printf("R: %d budzi L ds: %d\n", id, l_child[1]);
             ASSERT_SYS_OK(chsend(l_child[1], &dummy, 1));
         }
 
@@ -406,11 +426,14 @@ MIMPI_Retcode MIMPI_Barrier() {
         int* r_child = get_right_child(id);
 
         if (r_child != NULL) {
-//            printf("R: %d budzi R ds: %d\n", id, r_child[1]);
+            printf("R: %d budzi R ds: %d\n", id, r_child[1]);
             ASSERT_SYS_OK(chsend(r_child[1], &dummy, 1));
         }
 
     }
+
+
+    printf("R: %d konczy\n", id);
 
     return MIMPI_SUCCESS;
 
@@ -433,17 +456,6 @@ MIMPI_Retcode MIMPI_Bcast(
 
     virtual_tree[root] = 0;
     virtual_tree[0] = root;
-
-//    if (world_rank == root) {
-//        for (int i = 0; i < world_size; ++i) {
-//            if (i != world_rank) {
-//                MIMPI_Send(data, count, i, MIMPI_ANY_TAG);
-//            }
-//        }
-//    }
-//
-//    if (world_rank != root)
-//        MIMPI_Recv(data, count, root, MIMPI_ANY_TAG);
 
     int i = virtual_tree[world_rank];
 
@@ -469,88 +481,6 @@ MIMPI_Retcode MIMPI_Bcast(
 
     return MIMPI_SUCCESS;
 }
-
-//MIMPI_Retcode MIMPI_Bcast(
-//        void *data,
-//        int count,
-//        int root
-//) {
-//    if (root >= world_size || root < 0) {
-//        if (debug) {
-//            printf("BCAST error RANK rank: %d\n", world_rank);
-//        }
-//
-//        return MIMPI_ERROR_NO_SUCH_RANK;
-//    }
-//
-//
-//    virtual_tree[root] = 0;
-//    virtual_tree[0] = root;
-//    int i = virtual_tree[world_rank];
-//    int* us = get_curr(i);
-//    char dummy = 0;
-//
-//    if (i * 2 + 1<= world_size) {
-////        printf("R: %d, czeka na LD na ds: %d\n", id, us[0]);
-//        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
-//
-//        // wysylamy dane do lewego jesli jestesmy rootem
-//        if (i == 0) {
-//            MIMPI_Send(data, count, i * 2 + 1, MIMPI_ANY_TAG);
-//        }
-//    }
-//
-//    if (i * 2 + 2 <= world_size) {
-////        printf("R: %d, czeka na PD na ds: %d\n", id, us[0]);
-//        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
-//
-//        // wysylamy dane do prawego jesli jestesmy rootem
-//        if (i == 0) {
-//            MIMPI_Send(data, count, i * 2 + 2, MIMPI_ANY_TAG);
-//        }
-//    }
-//
-//    int* father = get_father(i);
-//
-//    // informujemy ojca ze jesmy gotowi
-//    if (i != 1) {
-////        printf("R: %d wysyla do ojca na ds %d\n", id, father[1]);
-//        chsend(father[1], &dummy, 1);
-//    }
-//
-//    // czekamy az nas obudzi
-//    if (i != 1) {
-////        printf("R: %d czeka na obudzenie na ds %d\n", id, us[0]);
-//        chrecv(us[0], &dummy, 1);
-//    }
-//
-//    // budzimy dzieci
-//    // ktos nas obudzil czyli mamy juz dane
-//    if (i * 2 + 1 <= world_size) {
-//        int* l_child = get_left_child(i);
-//
-//        if (l_child != NULL) {
-////            printf("R: %d budzi L ds: %d\n", id, l_child[1]);
-//            MIMPI_Send(data, count, i * 2 + 1, MIMPI_ANY_TAG);
-//            ASSERT_SYS_OK(chsend(l_child[1], &dummy, 1));
-//        }
-//
-//    }
-//
-//    if (i * 2 + 2 <= world_size) {
-//        int* r_child = get_right_child(i);
-//
-//        if (r_child != NULL) {
-////            printf("R: %d budzi R ds: %d\n", id, r_child[1]);
-//            MIMPI_Send(data, count, i * 2 + 2, MIMPI_ANY_TAG);
-//            ASSERT_SYS_OK(chsend(r_child[1], &dummy, 1));
-//        }
-//
-//    }
-//
-//    return MIMPI_SUCCESS;
-//}
-
 
 void calculate(uint8_t* buff, const uint8_t * recv_data,int count, MIMPI_Op op) {
     for (int i = 0; i < count; ++i) {

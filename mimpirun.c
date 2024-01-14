@@ -11,11 +11,16 @@
 int create_channels(int n) {
 
     int fd[2];
+    int temporary_n = 0;
+    int temporary[10][2];
 
     channel(fd);
 
     while (fd[0] <= 20 && fd[1] <= 20) {
+        temporary[temporary_n][0] = fd[0];
+        temporary[temporary_n][1] = fd[1];
         channel(fd);
+        temporary_n++;
     }
 
     char buff[6];
@@ -41,6 +46,13 @@ int create_channels(int n) {
     // stworzyc n chaneli na broadcast_tree
     for (int i = 0; i < n; ++i) {
         channel(fd);
+    }
+
+    // zamykamy tymczasowe
+
+    for (int i = 0; i < temporary_n; ++i) {
+        ASSERT_SYS_OK(close(temporary[i][0]));
+        ASSERT_SYS_OK(close(temporary[i][1]));
     }
 
     return minimal;
