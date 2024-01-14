@@ -75,6 +75,13 @@ static int debug = 1;
 
 #define MAX_PATH_LENGTH 1024
 
+// Macro to find the maximum of two values
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+// Macro to find the minimum of two values
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+
 void print_open_descriptors(void);
 
 #endif // MIMPI_COMMON_H

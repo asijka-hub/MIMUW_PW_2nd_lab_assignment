@@ -2,6 +2,7 @@
  * This file is for implementation of MIMPI library.
  * */
 
+#include "stdint.h"
 #include "channel.h"
 #include "mimpi.h"
 #include "mimpi_common.h"
@@ -550,6 +551,21 @@ MIMPI_Retcode MIMPI_Bcast(
 //    return MIMPI_SUCCESS;
 //}
 
+
+void calculate(uint8_t* buff, const uint8_t * recv_data,int count, MIMPI_Op op) {
+    for (int i = 0; i < count; ++i) {
+        if (op == MIMPI_MAX) {
+            buff[i] = MAX(buff[i], recv_data[i]);
+        } else if (op == MIMPI_MIN) {
+            buff[i] = MIN(buff[i], recv_data[i]);
+        } else if (op == MIMPI_SUM) {
+            buff[i] = buff[i] + recv_data[i];
+        } else if (op == MIMPI_PROD) {
+            buff[i] = buff[i] * recv_data[i];
+        }
+    }
+}
+
 MIMPI_Retcode MIMPI_Reduce(
     void const *send_data,
     void *recv_data,
@@ -557,5 +573,54 @@ MIMPI_Retcode MIMPI_Reduce(
     MIMPI_Op op,
     int root
 ) {
-    TODO
+    if (root >= world_size || root < 0) {
+        if (debug) {
+            printf("REDUCE error RANK rank: %d\n", world_rank);
+        }
+
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+
+    MIMPI_Barrier();
+
+    uint8_t * buff = malloc(count);
+    uint8_t * rec_buff = malloc(count);
+    memcpy(buff, send_data, count);
+
+    virtual_tree[root] = 0;
+    virtual_tree[0] = root;
+    int i = virtual_tree[world_rank];
+
+    // czekamy az dostaniemy czesciowe wyniki od dzieci
+
+    if (i * 2 + 1 < world_size) {
+        int l = virtual_tree[i * 2 + 1];
+//        printf("R: %d czekamy L na: %d\n", i, l);
+        MIMPI_Recv(rec_buff, count, l, MIMPI_ANY_TAG);
+        // dostalismy
+        calculate(buff, rec_buff, count, op);
+    }
+
+    if (i * 2 + 2 < world_size) {
+        int r = virtual_tree[i * 2 + 2];
+//        printf("R: %d czekamy P na: %d\n", i, r);
+        MIMPI_Recv(rec_buff, count, r, MIMPI_ANY_TAG);
+        // dostalismy
+        calculate(buff, rec_buff, count, op);
+    }
+
+    // wysylamy do ojca swoje czesciowe wyniki
+
+    if (i != 0) {
+        int father = virtual_tree[(i - 1) / 2];
+//        printf("R: %d wysylamy do ojca  na: %d\n", i, father);
+        MIMPI_Send(buff, count, father, MIMPI_ANY_TAG);
+    } else {
+        // jestesmy rootem czyli mamy juz u siebie ostateczny wynik
+        memcpy(recv_data, buff, count);
+    }
+
+    free(buff);
+
+    return MIMPI_SUCCESS;
 }
