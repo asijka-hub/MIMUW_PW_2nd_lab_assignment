@@ -43,8 +43,8 @@ int create_channels(int n) {
         //TODO assert ze sa w dobrej kolejnosci
     }
 
-    // stworzyc n chaneli na broadcast_tree
-    for (int i = 0; i < n; ++i) {
+    // stworzyc n -1 par chaneli na broadcast_tree
+    for (int i = 0; i < (n - 1) * 2; ++i) {
         channel(fd);
     }
 
@@ -98,7 +98,7 @@ int main(int argc, char *argv[]) {
 
     int broadcast_fd = minimal_fd + channel_n;
 
-    for (int i = broadcast_fd; i < broadcast_fd + n * 2; ++i) {
+    for (int i = broadcast_fd; i < broadcast_fd + (n - 1) * 4; ++i) {
         ASSERT_SYS_OK(close(i));
     }
 
