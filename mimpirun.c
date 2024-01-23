@@ -30,7 +30,7 @@ int create_channels(int n) {
 
     if (debug) printf("minimal channel number is: %d\n", fd[0]);
 
-    // stworzyc channele ile ich ma byc?
+    // stworzyc pary channele ile ich ma byc?
     // n * (n-1) / 2 * 2 = n * (n - 1)
     // TODO pomyslec co sie dzieje jak n=1
 

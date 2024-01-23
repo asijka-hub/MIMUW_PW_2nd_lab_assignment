@@ -6,6 +6,9 @@
 #include "channel.h"
 #include "mimpi.h"
 #include "mimpi_common.h"
+#include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 static int world_size = 0;
 static int world_rank = -1;
@@ -13,7 +16,6 @@ static int world_rank = -1;
 int channels[16][16][2]; // not used fields are marked with -1
 
 // IN BROADCAST WE USE FROM 0 INDEXING
-int broadcast_tree[16][2];
 
 int tree[16][4];
 int edge_n = 0;
@@ -34,43 +36,6 @@ int edge_n = 0;
 int virtual_tree[16] = {0, 1, 2, 3, 4, 5,6,7,
                         8,9,10,11,12,13,14,15};
 
-int* get_curr(int id) {
-    return broadcast_tree[id];
-}
-
-int* get_father(int id) {
-    if (id == 0) return broadcast_tree[0];
-    return broadcast_tree[(id - 1)/2];
-}
-
-int* get_left_child(int id) {
-    if (id * 2 + 1> world_size) return NULL;
-
-    return broadcast_tree[id * 2 + 1];
-}
-
-int* get_right_child(int id) {
-    if (id * 2 + 2> world_size) return NULL;
-
-    return broadcast_tree[id * 2 + 2];
-}
-
-void close_read(const int* id) {
-    if (id == NULL) return;
-
-//    if (world_rank == 0) printf("closing read: %d RANK %d\n", id[0], world_rank + 1);
-
-    if (id[0] != -1) ASSERT_SYS_OK(close(id[0]));
-}
-
-void close_write(const int* id) {
-    if (id == NULL) return;
-
-//    if (world_rank == 0) printf("closing write : %d RANK %d\n", id[1], world_rank + 1);
-
-    if (id[1] != -1) ASSERT_SYS_OK(close(id[1]));
-}
-
 // function assume that from and to are correct
 // it return -1 if channel is closed
 int get_send_fd(const int to) {
@@ -82,6 +47,210 @@ int get_send_fd(const int to) {
 int get_recv_fd(const int from) {
     return channels[from][world_rank][0];
 }
+
+
+atomic_bool running = false;
+
+typedef struct packet {
+    int tag;
+    int source;
+    int data_length;
+    int struct_size;
+    char data[];
+} packet_t;
+
+typedef struct {
+    packet_t **data;
+    size_t size;
+    size_t capacity;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} SharedBuffer;
+
+void initBuffer(SharedBuffer *buffer, size_t initialCapacity) {
+    buffer->data = (packet_t **)malloc(initialCapacity * sizeof(packet_t *));
+    buffer->size = 0;
+    buffer->capacity = initialCapacity;
+
+    pthread_mutex_init(&buffer->mutex, NULL);
+    pthread_cond_init(&buffer->cond, NULL);
+}
+
+void resizeBuffer(SharedBuffer *buffer) {
+    buffer->capacity *= 2;
+    buffer->data = (packet_t **)realloc(buffer->data, buffer->capacity * sizeof(packet_t *));
+}
+
+void addToBuffer(SharedBuffer *buffer, packet_t *packet) {
+    pthread_mutex_lock(&buffer->mutex);
+
+    if (buffer->size == buffer->capacity) {
+        resizeBuffer(buffer);
+    }
+
+    buffer->data[buffer->size++] = packet;
+
+    // Signal that data is available
+    pthread_cond_signal(&buffer->cond);
+    pthread_mutex_unlock(&buffer->mutex);
+}
+
+packet_t *removeFromBuffer(SharedBuffer *buffer) {
+    pthread_mutex_lock(&buffer->mutex);
+
+    while (buffer->size == 0) {
+        // Wait for data to be available
+        pthread_cond_wait(&buffer->cond, &buffer->mutex);
+    }
+
+    packet_t *packet = buffer->data[--buffer->size];
+
+    pthread_mutex_unlock(&buffer->mutex);
+
+    return packet;
+}
+
+packet_t *removeFromBufferByValues(SharedBuffer *buffer, int tag, int source, int data_length) {
+    pthread_mutex_lock(&buffer->mutex);
+
+    packet_t *removedPacket = NULL;
+
+    for (size_t i = 0; i < buffer->size; ++i) {
+        if (buffer->data[i]->tag == tag && buffer->data[i]->source == source && buffer->data[i]->data_length == data_length) {
+            // Found the matching packet, remove it
+            removedPacket = buffer->data[i];
+
+            // Shift remaining packets to eliminate blank spots
+            for (size_t j = i; j < buffer->size - 1; ++j) {
+                buffer->data[j] = buffer->data[j + 1];
+            }
+
+            --buffer->size;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&buffer->mutex);
+
+    return removedPacket;
+}
+
+void destroyBuffer(SharedBuffer *buffer) {
+    free(buffer->data);
+    pthread_mutex_destroy(&buffer->mutex);
+    pthread_cond_destroy(&buffer->cond);
+}
+
+SharedBuffer* p_buff;
+
+//pthread_cond_t packet_arrive;
+//pthread_mutex_t mut;
+
+typedef struct args {
+    int id;
+    SharedBuffer* p_buffer;
+    pthread_cond_t* p_packet_arrive;
+} args_t;
+
+// musimy wiedziec na co teraz czeka P
+// ale kazdy worker czyta tyle ile moze
+
+
+typedef struct packet_header {
+    int tag;
+    int data_length;
+} packet_header_t;
+
+// Memory allocation and initialisation of structure
+packet_t * create_packet(int tag, int source, int length_left)
+{
+    // Allocating memory according to user provided
+    // array of characters
+    packet_t* p = malloc(sizeof(packet_t) + sizeof(char) * length_left);
+
+    p->tag = tag;
+    p->data_length = length_left;
+    p->source = source;
+
+    // Assigning size according to size of stud_name
+    // which is a copy of user provided array a[].
+    p->struct_size = (sizeof(*p) + sizeof(char) * length_left);
+
+    return p;
+}
+
+void print_packet(packet_t* p) {
+    printf("tag: %d\n", p->tag);
+    printf("data_length: %d\n", p->data_length);
+    printf("source: %d\n", p->source);
+    printf("struct_size: %d\n", p->struct_size);
+}
+
+// don't end until readed n bytes
+/// read exacly n bytes, return false if piped closed \n
+/// caller must guranty that buf is okey
+bool read_n(const int fd, void* buf,const int n) {
+    int rec = 0;
+    int left = n;
+    int received = 0;
+
+    while (left > 0) {
+        received += rec;
+        rec = chrecv(fd, buf + received, n);
+        if (rec == 0) {
+            return false;
+        }
+        left -= rec;
+    }
+
+    return true;
+}
+
+void* worker(void* data)
+{
+    args_t args = *((args_t *)data);
+
+    SharedBuffer* p_buffer = args.p_buffer;
+    pthread_cond_t* p_packet_arrive = args.p_packet_arrive;
+    int id = args.id;
+
+    int rec_ds = channels[id][world_rank][0];
+    char tmp_buff[PIPE_BUF];
+    int rec = 0;
+    packet_t  packet;
+    packet_header_t header;
+
+
+    while (running) {
+//        printf("SIEMA from %d\n", args.id);
+        // musi wiedziec od kogo czyta
+        // wordk rank + id
+
+        if (read_n(rec_ds, &header, sizeof (packet_header_t))) {
+            assert(header.data_length > 0);
+
+            packet_t* p_packet = create_packet(header.tag, id, header.data_length);
+
+            if (read_n(rec_ds, &p_packet->data, header.data_length)) {
+                print_packet(p_packet);
+
+                addToBuffer(p_buffer, p_packet);
+            }
+
+
+        } else {
+            // TODO co zrobic jak pipe byl closed
+
+        }
+    }
+
+    free(data);
+
+    return 0;
+}
+
+
+
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
@@ -150,12 +319,6 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         ASSERT_SYS_OK(close(tmp_fd++));
     }
 
-//    for (int i = 0; i < 16; ++i) {
-//        for (int j = 0; j < 2; ++j) {
-//            broadcast_tree[i][j] = -1;
-//        }
-//    }
-
     edge_n = n - 1;
 
     for (int i = 0; i < edge_n; ++i) {
@@ -164,11 +327,6 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         tree[i][WRITE_TO_DOWN] = -1;
         tree[i][WRITE_TO_UP] = -1;
     }
-
-//    for (int i = 0; i < n; ++i) {
-//        broadcast_tree[i][0] = tmp_fd++;
-//        broadcast_tree[i][1] = tmp_fd++;
-//    }
 
     for (int i = 0; i < edge_n; ++i) {
         tree[i][READ_FROM_UP] = tmp_fd++;
@@ -187,45 +345,18 @@ void MIMPI_Init(bool enable_deadlock_detection) {
             if (i == world_rank || j == world_rank) {
                 if (i == world_rank) {
                     // we are closing reading end
-//                    printf("closing fd: %d\n", channels[i][j][0]);
                     ASSERT_SYS_OK(close(channels[i][j][0]));
                 }
                 if (j == world_rank) {
                     // closing writing end
-//                    printf("closing fd: %d\n", channels[i][j][1]);
                     ASSERT_SYS_OK(close(channels[i][j][1]));
                 }
             } else {
-//                printf("closing fd: %d\n", channels[i][j][0]);
                 ASSERT_SYS_OK(close(channels[i][j][0]));
-//                printf("closing fd: %d\n", channels[i][j][1]);
                 ASSERT_SYS_OK(close(channels[i][j][1]));
             }
         }
     }
-
-//    int id = world_rank;
-//    int* us = get_curr(id);
-//    int* father = get_father(id);
-//    int* l_child = get_left_child(id);
-//    int* r_child = get_right_child(id);
-//
-//    for (int i = 0; i < n; ++i) {
-//        int* curr= get_curr(i);
-//
-//        if (curr == us) {
-//            close_write(us);
-//        } else if (curr == father) {
-//            close_read(father);
-//        } else if (curr == l_child) {
-//            close_read(l_child);
-//        } else if (curr == r_child) {
-//            close_read(r_child);
-//        } else {
-//            ASSERT_SYS_OK(close(curr[0]));
-//            ASSERT_SYS_OK(close(curr[1]));
-//        }
-//    }
 
     int id = world_rank;
     // edges numbers if exists
@@ -237,26 +368,15 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     for (int i = 0; i < edge_n; ++i) {
         if (i == from_father) {
             // close father read and write
-//            printf("closing: %d\n", tree[from_father][READ_FROM_DOWN]);
-//            printf("closing: %d\n", tree[from_father][WRITE_TO_DOWN]);
             ASSERT_SYS_OK(close(tree[from_father][READ_FROM_DOWN]));
             ASSERT_SYS_OK(close(tree[from_father][WRITE_TO_DOWN]));
         } else if (i == l_child) {
-//            printf("closing: %d\n", tree[l_child][READ_FROM_UP]);
-//            printf("closing: %d\n", tree[l_child][WRITE_TO_UP]);
             ASSERT_SYS_OK(close(tree[l_child][READ_FROM_UP]));
             ASSERT_SYS_OK(close(tree[l_child][WRITE_TO_UP]));
         } else if (i == r_child) {
-//            printf("closing: %d\n", tree[r_child][READ_FROM_UP]);
-//            printf("closing: %d\n", tree[r_child][WRITE_TO_UP]);
             ASSERT_SYS_OK(close(tree[r_child][READ_FROM_UP]));
             ASSERT_SYS_OK(close(tree[r_child][WRITE_TO_UP]));
         } else {
-            // random edge close all
-//            printf("closing: %d\n", tree[i][READ_FROM_DOWN]);
-//            printf("closing: %d\n", tree[i][WRITE_TO_DOWN]);
-//            printf("closing: %d\n", tree[i][READ_FROM_UP]);
-//            printf("closing: %d\n", tree[i][WRITE_TO_UP]);
             ASSERT_SYS_OK(close(tree[i][READ_FROM_DOWN]));
             ASSERT_SYS_OK(close(tree[i][WRITE_TO_DOWN]));
             ASSERT_SYS_OK(close(tree[i][READ_FROM_UP]));
@@ -264,36 +384,36 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         }
     }
 
-//    if (world_rank == 0) {
-//        for (int i = 0; i < edge_n; ++i) {
-//            printf(" (%d, %d, %d, %d) \n", tree[i][READ_FROM_UP], tree[i][WRITE_TO_DOWN], tree[i][READ_FROM_DOWN], tree[i][WRITE_TO_UP]);
-//        }
-//    }
 
-//    if (debug) {
-//        if (world_rank == 0 ) {
-//            for (int i = 0; i < n; ++i) {
-//                for (int j = 0; j < n; ++j) {
-//                    printf(" (%d, %d) ", channels[i][j][0], channels[i][j][1]);
-//                }
-//                printf("\n");
-//            }
-//        }
-//    }
+    // Create thread attributes.
+    pthread_attr_t attr;
+    ASSERT_ZERO(pthread_attr_init(&attr));
+    ASSERT_ZERO(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED ));
 
-//    if (debug) {
-//        if (world_rank == 0) {
-//            for (int i = 1; i <= n; ++i) {
-//                printf(" (%d, %d) ", broadcast_tree[i][0], broadcast_tree[i][1]);
-//            }
-//            printf("\n");
-//        }
-//    }
+    running = true;
 
+    initBuffer(p_buff, 10);
+
+    ASSERT_ZERO(pthread_mutex_init(&p_buff->mutex, NULL));
+    ASSERT_ZERO(pthread_cond_init(&p_buff->cond, NULL));
+
+    // Create (and start) the threads.
+    pthread_t threads[n];
+    for (int i = 0; i < n; i++) {
+        if (i == world_rank) {
+            args_t * worker_arg = malloc(sizeof(args_t));
+            worker_arg->id = i;
+            worker_arg->p_buffer = p_buff;
+            worker_arg->p_packet_arrive = &p_buff->cond;
+            ASSERT_ZERO(pthread_create(&threads[i], &attr, worker, worker_arg));
+        }
+    }
 }
 
 void MIMPI_Finalize() {
     // pozamykac wszystkie channele ktorych bysme potrzebowali
+
+    running = false;
 
     for (int i = 0; i < world_size; ++i) {
         for (int j = 0; j < world_size; ++j) {
@@ -303,37 +423,15 @@ void MIMPI_Finalize() {
             if (i == world_rank || j == world_rank) {
                 if (i == world_rank) {
                     // we are closing reading end
-//                    printf("closing fd: %d\n", channels[i][j][1]);
                     ASSERT_SYS_OK(close(channels[i][j][1]));
                 }
                 if (j == world_rank) {
                     // closing writing end
-//                    printf("closing fd: %d\n", channels[i][j][0]);
                     ASSERT_SYS_OK(close(channels[i][j][0]));
                 }
             }
         }
     }
-
-//    int id = world_rank;
-//    int* us = get_curr(id);
-//    int* father = get_father(id);
-//    int* l_child = get_left_child(id);
-//    int* r_child = get_right_child(id);
-//
-//    for (int i = 0; i < world_size; ++i) {
-//        int* curr= get_curr(i);
-//
-//        if (curr == us) {
-//            close_read(us);
-//        } else if (curr == father) {
-//            close_write(father);
-//        } else if (curr == l_child) {
-//            close_write(l_child);
-//        } else if (curr == r_child) {
-//            close_write(r_child);
-//        }
-//    }
 
     int id = world_rank;
     // edges numbers if exists
@@ -345,18 +443,12 @@ void MIMPI_Finalize() {
     for (int i = 0; i < edge_n; ++i) {
         if (i == from_father) {
             // close father read and write
-//            printf("closing: %d\n", tree[from_father][READ_FROM_UP]);
-//            printf("closing: %d\n", tree[from_father][WRITE_TO_UP]);
             ASSERT_SYS_OK(close(tree[from_father][READ_FROM_UP]));
             ASSERT_SYS_OK(close(tree[from_father][WRITE_TO_UP]));
         } else if (i == l_child) {
-//            printf("closing: %d\n", tree[l_child][READ_FROM_DOWN]);
-//            printf("closing: %d\n", tree[l_child][WRITE_TO_DOWN]);
             ASSERT_SYS_OK(close(tree[l_child][READ_FROM_DOWN]));
             ASSERT_SYS_OK(close(tree[l_child][WRITE_TO_DOWN]));
         } else if (i == r_child) {
-//            printf("closing: %d\n", tree[r_child][READ_FROM_DOWN]);
-//            printf("closing: %d\n", tree[r_child][WRITE_TO_DOWN]);
             ASSERT_SYS_OK(close(tree[r_child][READ_FROM_DOWN]));
             ASSERT_SYS_OK(close(tree[r_child][WRITE_TO_DOWN]));
         }
@@ -365,6 +457,9 @@ void MIMPI_Finalize() {
     if (debug) print_open_descriptors();
 
 //    print_open_descriptors();
+
+    ASSERT_ZERO(pthread_cond_destroy(&p_buff->cond));
+    ASSERT_ZERO(pthread_mutex_destroy(&p_buff->mutex));
 
     channels_finalize();
 }
@@ -393,7 +488,7 @@ MIMPI_Retcode MIMPI_Send(
 
     int send_fd = get_send_fd(destination);
 
-    if (chsend(send_fd, data, count) == -1) {
+    if (chsend(send_fd, data, count) == -1 && errno == EPIPE) {
         if (debug) printf("finished send rank: %d\n", world_rank);
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
@@ -427,17 +522,14 @@ MIMPI_Retcode MIMPI_Recv(
 
     int recv_fd = get_recv_fd(source);
 
-//    if (chrecv(recv_fd, data, count) == 0) {
-//        if (debug) printf("finished recv rank: %d\n", world_rank);
-//
-//        return MIMPI_ERROR_REMOTE_FINISHED;
-//    }
-
     int left = count;
     int rec = 0;
+    int received = 0;
 
     while (left > 0) {
-        rec = chrecv(recv_fd, data, left);
+        received += rec;
+
+        rec = chrecv(recv_fd, data + received, left);
 
         if (rec == 0) {
             if (debug) printf("finished recv rank: %d\n", world_rank);
@@ -451,87 +543,6 @@ MIMPI_Retcode MIMPI_Recv(
 
     return MIMPI_SUCCESS;
 }
-
-//MIMPI_Retcode MIMPI_Barrier() {
-//    // jesli mamy dzieci czekamy na nie
-//    // kiedy dzieci skoncza wysylamy sygnal do ojca i czekamy na ojca
-//
-//    if (world_size == 1) return MIMPI_SUCCESS;
-//
-//    int id = world_rank;
-//    int* us = get_curr(id);
-//    char dummy = 0;
-//    int rec = 0;
-//
-//    if (id * 2 + 1 < world_size) {
-//        printf("R: %d, czeka na LD na ds: %d\n", id, us[0]);
-////        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
-//        rec = chrecv(us[0], &dummy, 1);
-//
-//        if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-//
-//            return MIMPI_ERROR_REMOTE_FINISHED;
-//        }
-//    }
-//
-//    if (id * 2 + 2 < world_size) {
-//        printf("R: %d, czeka na PD na ds: %d\n", id, us[0]);
-//        rec = chrecv(us[0], &dummy, 1);
-//
-//        if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-//
-//            return MIMPI_ERROR_REMOTE_FINISHED;
-//        }
-//    }
-//
-//    int* father = get_father(id);
-//    // send that we are ready
-//    if (id != 0) {
-//        printf("R: %d wysyla do ojca na ds %d\n", id, father[1]);
-//        chsend(father[1], &dummy, 1);
-//    }
-//
-//    // czekamy az obudzi nas ojciec
-//    if (id != 0) {
-//        printf("R: %d czeka na obudzenie na ds %d\n", id, us[0]);
-//        rec = chrecv(us[0], &dummy, 1);
-//
-//        if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-//
-//            return MIMPI_ERROR_REMOTE_FINISHED;
-//        }
-//    }
-//
-//    // budzimy dzieci
-//    if (id * 2 + 1 < world_size) {
-//        int* l_child = get_left_child(id);
-//
-//        if (l_child != NULL) {
-//            printf("R: %d budzi L ds: %d\n", id, l_child[1]);
-//            ASSERT_SYS_OK(chsend(l_child[1], &dummy, 1));
-//        }
-//
-//    }
-//
-//    if (id * 2 + 2 < world_size) {
-//        int* r_child = get_right_child(id);
-//
-//        if (r_child != NULL) {
-//            printf("R: %d budzi R ds: %d\n", id, r_child[1]);
-//            ASSERT_SYS_OK(chsend(r_child[1], &dummy, 1));
-//        }
-//
-//    }
-//
-//
-//    printf("R: %d konczy\n", id);
-//
-//    return MIMPI_SUCCESS;
-//
-//}
 
 MIMPI_Retcode MIMPI_Barrier() {
     // jesli mamy dzieci czekamy na nie
@@ -548,31 +559,23 @@ MIMPI_Retcode MIMPI_Barrier() {
 
 
     if (2 * id + 1 < world_size) {
-//        printf("R: %d, czeka na LD na ds: %d\n", id, tree[l_child][READ_FROM_DOWN]);
-//        ASSERT_SYS_OK(chrecv(us[0], &dummy, 1));
         rec = chrecv(tree[l_child][READ_FROM_DOWN], &dummy, 1);
 
         if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
     if (2 * id + 2 < world_size) {
-//        printf("R: %d, czeka na PD na ds: %d\n", id, tree[r_child][READ_FROM_DOWN]);
         rec = chrecv(tree[r_child][READ_FROM_DOWN], &dummy, 1);
 
         if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
     // send that we are ready
     if (id != 0) {
-//        printf("R: %d wysyla do ojca na ds %d\n", id, tree[father][WRITE_TO_UP]);
         if (chsend(tree[father][WRITE_TO_UP], &dummy, 1) == -1 ) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
@@ -580,36 +583,27 @@ MIMPI_Retcode MIMPI_Barrier() {
 
     // czekamy az obudzi nas ojciec
     if (id != 0) {
-//        printf("R: %d czeka na obudzenie na ds %d\n", id, tree[father][READ_FROM_UP]);
         rec = chrecv(tree[father][READ_FROM_UP], &dummy, 1);
 
         if (rec == 0) {
-//            printf("R: %d konczy\n", id);
-
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
     // budzimy dzieci
     if (2 * id + 1 < world_size) {
-//        printf("R: %d budzi ds %d\n", id, tree[l_child][WRITE_TO_DOWN]);
         if (chsend(tree[l_child][WRITE_TO_DOWN], &dummy, 1) == -1) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
     if (2 * id + 2 < world_size) {
-//        printf("R: %d budzi ds %d\n", id, tree[r_child][WRITE_TO_DOWN]);
         if (chsend(tree[r_child][WRITE_TO_DOWN], &dummy, 1) == -1) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
-
-//    printf("R: %d konczy\n", id);
-
     return MIMPI_SUCCESS;
-
 }
 
 MIMPI_Retcode MIMPI_Bcast(
@@ -644,7 +638,6 @@ MIMPI_Retcode MIMPI_Bcast(
         int l = virtual_tree[i * 2 + 1];
         int r = virtual_tree[i * 2 + 2];
 
-//        printf("R: %d we are waiting for %d\n",world_rank, father);
         MIMPI_Recv(data, count, father, MIMPI_ANY_TAG);
         if (i * 2 + 1 < world_size) MIMPI_Send(data, count, l, MIMPI_ANY_TAG);
         if (i * 2 + 2 < world_size) MIMPI_Send(data, count, r, MIMPI_ANY_TAG);
@@ -698,7 +691,6 @@ MIMPI_Retcode MIMPI_Reduce(
 
     if (i * 2 + 1 < world_size) {
         int l = virtual_tree[i * 2 + 1];
-//        printf("R: %d czekamy L na: %d\n", i, l);
         MIMPI_Recv(rec_buff, count, l, MIMPI_ANY_TAG);
         // dostalismy
         calculate(buff, rec_buff, count, op);
@@ -706,7 +698,6 @@ MIMPI_Retcode MIMPI_Reduce(
 
     if (i * 2 + 2 < world_size) {
         int r = virtual_tree[i * 2 + 2];
-//        printf("R: %d czekamy P na: %d\n", i, r);
         MIMPI_Recv(rec_buff, count, r, MIMPI_ANY_TAG);
         // dostalismy
         calculate(buff, rec_buff, count, op);
@@ -716,7 +707,6 @@ MIMPI_Retcode MIMPI_Reduce(
 
     if (i != 0) {
         int father = virtual_tree[(i - 1) / 2];
-//        printf("R: %d wysylamy do ojca  na: %d\n", i, father);
         MIMPI_Send(buff, count, father, MIMPI_ANY_TAG);
     } else {
         // jestesmy rootem czyli mamy juz u siebie ostateczny wynik
@@ -724,6 +714,7 @@ MIMPI_Retcode MIMPI_Reduce(
     }
 
     free(buff);
+    free(rec_buff);
 
     return MIMPI_SUCCESS;
 }
